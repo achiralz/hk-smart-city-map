@@ -11,7 +11,10 @@ const toggleCam = document.querySelector("#toggle-cam");
 
 let map;
 let network = { lines: [], stations: [] };
+const CAMERA_ZOOM = 13;
 let cameras = [];
+let camerasLoaded = false;
+let camerasLoading = null;
 let stationByCode = new Map();
 let lineByCode = new Map();
 let selectedStation = "";
@@ -87,16 +90,74 @@ function stationFeatures() {
   };
 }
 
-function cameraFeatures() {
+function cameraFeatures(list) {
   return {
     type: "FeatureCollection",
-    features: cameras.map((camera) => ({
+    features: (list || []).map((camera) => ({
       type: "Feature",
       id: camera.key,
       properties: camera,
       geometry: { type: "Point", coordinates: [camera.lon, camera.lat] },
     })),
   };
+}
+
+function camerasInView() {
+  if (!map || map.getZoom() < CAMERA_ZOOM) return [];
+  const bounds = map.getBounds();
+  const west = bounds.getWest();
+  const east = bounds.getEast();
+  const south = bounds.getSouth();
+  const north = bounds.getNorth();
+  const padLon = (east - west) * 0.2;
+  const padLat = (north - south) * 0.2;
+  return cameras.filter((camera) => camera.lon >= west - padLon && camera.lon <= east + padLon
+    && camera.lat >= south - padLat && camera.lat <= north + padLat);
+}
+
+function updateSummary() {
+  const stationText = network.stations.length ? network.stations.length + " 個港鐵站" : "港鐵網絡未能載入";
+  let cameraText = "放大後才顯示交通快拍";
+  if (!toggleCam.checked) cameraText = "交通快拍已隱藏";
+  else if (map && map.getZoom() >= CAMERA_ZOOM) {
+    cameraText = camerasLoaded ? camerasInView().length + " 個畫面內快拍點" : "正在載入畫面內的快拍點";
+  }
+  summary.textContent = stationText + " · " + cameraText;
+}
+
+function refreshVisibleCameras() {
+  const source = map && map.getSource("cameras");
+  if (!source) return;
+  const visible = toggleCam.checked && map.getZoom() >= CAMERA_ZOOM && camerasLoaded;
+  source.setData(cameraFeatures(visible ? camerasInView() : []));
+  updateSummary();
+}
+
+function ensureCameras() {
+  if (camerasLoaded) return Promise.resolve(true);
+  if (!camerasLoading) {
+    camerasLoading = loadJson("data/cameras.json").then((data) => {
+      cameras = data;
+      camerasLoaded = true;
+      return true;
+    }).catch(() => {
+      camerasLoading = null;
+      showBanner("暫時未能載入交通快拍點。");
+      return false;
+    });
+  }
+  return camerasLoading;
+}
+
+function updateCamerasForView() {
+  if (!map) return;
+  if (!toggleCam.checked || map.getZoom() < CAMERA_ZOOM) {
+    refreshVisibleCameras();
+    return;
+  }
+  ensureCameras().then((loaded) => {
+    if (loaded) refreshVisibleCameras();
+  });
 }
 
 function setLayerVisibility(layers, visible) {
@@ -109,6 +170,7 @@ function setLayerVisibility(layers, visible) {
 function applyLayerToggles() {
   setLayerVisibility(["mtr-lines", "stations", "station-labels"], toggleMtr.checked);
   setLayerVisibility(["camera-clusters", "camera-counts", "camera-points"], toggleCam.checked);
+  updateCamerasForView();
 }
 
 function fitAll() {
@@ -316,7 +378,19 @@ function showSearch(query) {
       || canonical(station.en).includes(folded)
       || station.code.toLowerCase() === text.toLowerCase();
   }).slice(0, 8);
-  const cameraHits = text.length >= 2
+  if (text.length >= 2 && !camerasLoaded) {
+    ensureCameras().then(() => {
+      if (searchInput.value.trim() === text) showSearch(text);
+    });
+    if (!stationHits.length) {
+      const item = el("li");
+      item.append(el("p", "muted", "正在搜尋快拍點…"));
+      results.append(item);
+      results.hidden = false;
+      return;
+    }
+  }
+  const cameraHits = text.length >= 2 && camerasLoaded
     ? cameras.filter((camera) => canonical(camera.name).includes(folded) || camera.key.toLowerCase().includes(text.toLowerCase())).slice(0, 6)
     : [];
   if (!stationHits.length && !cameraHits.length) {
@@ -352,6 +426,334 @@ function showSearch(query) {
   results.hidden = false;
 }
 
+const TRAIN_ZOOM = 13;
+const TRAIN_SEGMENT_MIN_MS = 60 * 1000;
+const TRAIN_SEGMENT_MAX_MS = 8 * 60 * 1000;
+const LINE_ROUTES = [
+  { line: "ISL", stations: ["KET", "HKU", "SYP", "SHW", "CEN", "ADM", "WAC", "CAB", "TIH", "FOH", "NOP", "QUB", "TAK", "SWH", "SKW", "HFC", "CHW"] },
+  { line: "TWL", stations: ["CEN", "ADM", "TST", "JOR", "YMT", "MOK", "PRE", "SSP", "CSW", "LCK", "MEF", "LAK", "KWF", "KWH", "TWH", "TSW"] },
+  { line: "KTL", stations: ["WHA", "HOM", "YMT", "MOK", "PRE", "SKM", "KOT", "LOF", "WTS", "DIH", "CHH", "KOB", "NTK", "KWT", "LAT", "YAT", "TIK"] },
+  { line: "TKL", stations: ["NOP", "QUB", "YAT", "TIK", "TKO", "HAH", "POA"] },
+  { line: "TKL", stations: ["NOP", "QUB", "YAT", "TIK", "TKO", "LHP"] },
+  { line: "EAL", stations: ["ADM", "EXC", "HUH", "MKK", "KOT", "TAW", "SHT", "FOT", "UNI", "TAP", "TWO", "FAN", "SHS", "LOW"] },
+  { line: "EAL", viaRac: true, stations: ["ADM", "EXC", "HUH", "MKK", "KOT", "TAW", "SHT", "RAC", "UNI", "TAP", "TWO", "FAN", "SHS", "LOW"] },
+  { line: "EAL", stations: ["ADM", "EXC", "HUH", "MKK", "KOT", "TAW", "SHT", "FOT", "UNI", "TAP", "TWO", "FAN", "SHS", "LMC"] },
+  { line: "EAL", viaRac: true, stations: ["ADM", "EXC", "HUH", "MKK", "KOT", "TAW", "SHT", "RAC", "UNI", "TAP", "TWO", "FAN", "SHS", "LMC"] },
+  { line: "TML", stations: ["WKS", "MOS", "HEO", "TSH", "SHM", "CIO", "STW", "CKT", "TAW", "HIK", "DIH", "KAT", "SUW", "TKW", "HOM", "HUH", "ETS", "AUS", "NAC", "MEF", "TWW", "KSR", "YUL", "LOP", "TIS", "SIH", "TUM"] },
+  { line: "TCL", stations: ["HOK", "KOW", "OLY", "NAC", "LAK", "TSY", "SUN", "TUC"] },
+  { line: "AEL", stations: ["HOK", "KOW", "TSY", "AIR", "AWE"] },
+  { line: "SIL", stations: ["ADM", "OCP", "WCH", "LET", "SOH"] },
+  { line: "DRL", stations: ["SUN", "DIS"] },
+];
+let lineRoutes = [];
+let routesReady = false;
+const scheduleCache = new Map();
+const durationCache = new Map();
+const geometryCache = new Map();
+const trainMarkers = new Map();
+
+function llMetres(point) {
+  return [point[0] * 111320 * Math.cos(22.3 * Math.PI / 180), point[1] * 110540];
+}
+
+function llDist(a, b) {
+  const am = llMetres(a);
+  const bm = llMetres(b);
+  return Math.hypot(am[0] - bm[0], am[1] - bm[1]);
+}
+
+function lerpPoint(a, b, t) {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+
+function bearingDeg(a, b) {
+  const lat1 = a[1] * Math.PI / 180;
+  const lat2 = b[1] * Math.PI / 180;
+  const dLon = (b[0] - a[0]) * Math.PI / 180;
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  return Math.atan2(y, x) * 180 / Math.PI;
+}
+
+function projectOnPath(lon, lat, path) {
+  let best = { offset: Infinity, along: 0, index: 0, t: 0 };
+  let travel = 0;
+  const point = llMetres([lon, lat]);
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const a = path[i];
+    const b = path[i + 1];
+    const am = llMetres(a);
+    const bm = llMetres(b);
+    const dx = bm[0] - am[0];
+    const dy = bm[1] - am[1];
+    const seg = Math.hypot(dx, dy) || 0.001;
+    const t = Math.max(0, Math.min(1, ((point[0] - am[0]) * dx + (point[1] - am[1]) * dy) / (dx * dx + dy * dy || 1)));
+    const offset = Math.hypot(point[0] - (am[0] + t * dx), point[1] - (am[1] + t * dy));
+    if (offset < best.offset) best = { offset, along: travel + seg * t, index: i, t };
+    travel += seg;
+  }
+  return best;
+}
+
+function slicePath(path, from, to) {
+  const reverse = to.along < from.along;
+  const start = reverse ? to : from;
+  const end = reverse ? from : to;
+  const coords = [lerpPoint(path[start.index], path[start.index + 1], start.t)];
+  for (let i = start.index + 1; i <= end.index; i += 1) coords.push(path[i]);
+  coords.push(lerpPoint(path[end.index], path[end.index + 1], end.t));
+  const cleaned = [coords[0]];
+  coords.slice(1).forEach((point) => {
+    if (llDist(cleaned[cleaned.length - 1], point) > 3) cleaned.push(point);
+  });
+  if (cleaned.length < 2) cleaned.push(coords[coords.length - 1]);
+  return reverse ? cleaned.reverse() : cleaned;
+}
+
+function segmentGeometry(route, fromStation, toStation) {
+  const key = route.line + ":" + fromStation.code + ":" + toStation.code;
+  if (geometryCache.has(key)) return geometryCache.get(key);
+  const paths = network.lines.find((line) => line.code === route.line).paths;
+  let geometry = null;
+  let bestScore = Infinity;
+  paths.forEach((path) => {
+    const from = projectOnPath(fromStation.lon, fromStation.lat, path);
+    const to = projectOnPath(toStation.lon, toStation.lat, path);
+    if (from.offset < 450 && to.offset < 450) {
+      const score = from.offset + to.offset;
+      if (score < bestScore) {
+        bestScore = score;
+        geometry = slicePath(path, from, to);
+      }
+    }
+  });
+  if (!geometry) {
+    const fromChoices = paths.map((path) => ({ path, proj: projectOnPath(fromStation.lon, fromStation.lat, path) }));
+    const toChoices = paths.map((path) => ({ path, proj: projectOnPath(toStation.lon, toStation.lat, path) }));
+    const fromBest = fromChoices.reduce((best, item) => item.proj.offset < best.proj.offset ? item : best);
+    const toBest = toChoices.reduce((best, item) => item.proj.offset < best.proj.offset ? item : best);
+    const fromEnd = llDist(fromBest.path[0], toBest.path[0]) < llDist(fromBest.path[fromBest.path.length - 1], toBest.path[0])
+      ? { along: 0, index: 0, t: 0 }
+      : projectOnPath(fromBest.path[fromBest.path.length - 1][0], fromBest.path[fromBest.path.length - 1][1], fromBest.path);
+    const toStart = { along: 0, index: 0, t: 0 };
+    geometry = slicePath(fromBest.path, fromBest.proj, fromEnd).concat(slicePath(toBest.path, toStart, toBest.proj));
+  }
+  geometryCache.set(key, geometry);
+  return geometry;
+}
+
+function pointAlong(coords, fraction) {
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < coords.length - 1; i += 1) {
+    const length = llDist(coords[i], coords[i + 1]);
+    lengths.push(length);
+    total += length;
+  }
+  let target = total * Math.max(0, Math.min(1, fraction));
+  for (let i = 0; i < lengths.length; i += 1) {
+    if (target <= lengths[i] || i === lengths.length - 1) {
+      const t = lengths[i] ? Math.max(0, Math.min(1, target / lengths[i])) : 0;
+      return {
+        point: lerpPoint(coords[i], coords[i + 1], t),
+        bearing: bearingDeg(coords[i], coords[i + 1]),
+      };
+    }
+    target -= lengths[i];
+  }
+  return { point: coords[coords.length - 1], bearing: 0 };
+}
+
+function ensureRoutes() {
+  if (routesReady || !network.lines.length) return;
+  LINE_ROUTES.forEach((definition) => {
+    const stations = definition.stations.map((code) => stationByCode.get(code)).filter(Boolean);
+    if (stations.length < 2) return;
+    const color = lineByCode.get(definition.line).color;
+    lineRoutes.push({ line: definition.line, viaRac: !!definition.viaRac, stations, color });
+    lineRoutes.push({ line: definition.line, viaRac: !!definition.viaRac, stations: stations.slice().reverse(), color });
+  });
+  routesReady = true;
+}
+
+function stationInside(station, bounds, padLon, padLat) {
+  return station.lon >= bounds.getWest() - padLon && station.lon <= bounds.getEast() + padLon
+    && station.lat >= bounds.getSouth() - padLat && station.lat <= bounds.getNorth() + padLat;
+}
+
+function stationJobsInView() {
+  const bounds = map.getBounds();
+  const padLon = (bounds.getEast() - bounds.getWest()) * 0.15;
+  const padLat = (bounds.getNorth() - bounds.getSouth()) * 0.15;
+  const visible = new Set(network.stations.filter((station) => stationInside(station, bounds, padLon, padLat)).map((station) => station.code));
+  const jobs = new Map();
+  lineRoutes.forEach((route) => {
+    route.stations.forEach((station, index) => {
+      const nearby = visible.has(station.code)
+        || (index > 0 && visible.has(route.stations[index - 1].code))
+        || (index + 1 < route.stations.length && visible.has(route.stations[index + 1].code));
+      if (nearby) jobs.set(route.line + ":" + station.code, { line: route.line, code: station.code });
+    });
+  });
+  return [...jobs.values()];
+}
+
+function trainsToward(route, index) {
+  const cached = scheduleCache.get(route.line + ":" + route.stations[index].code);
+  if (!cached || cached.error) return [];
+  const ahead = new Set(route.stations.slice(index).map((station) => station.code));
+  return cached.up.concat(cached.down).filter((train) => {
+    if (route.line === "EAL" && route.viaRac !== (train.route === "RAC")) return false;
+    return ahead.has(train.dest);
+  });
+}
+
+function segmentDuration(route, index) {
+  const key = route.line + ":" + route.stations[index].code + ":" + route.stations[index + 1].code + ":" + (route.viaRac ? "R" : "N");
+  const saved = durationCache.get(key);
+  if (saved && Date.now() - saved.at < 120000) return saved.ms;
+  const samples = [];
+  trainsToward(route, index).forEach((earlier) => {
+    const earlierTime = parseHongKongTime(earlier.time);
+    if (!earlierTime) return;
+    let best = null;
+    trainsToward(route, index + 1).forEach((later) => {
+      if (later.dest !== earlier.dest) return;
+      const laterTime = parseHongKongTime(later.time);
+      if (!laterTime) return;
+      const gap = laterTime.getTime() - earlierTime.getTime();
+      if (gap >= TRAIN_SEGMENT_MIN_MS && gap <= TRAIN_SEGMENT_MAX_MS && (best === null || gap < best)) best = gap;
+    });
+    if (best) samples.push(best);
+  });
+  if (!samples.length) return null;
+  samples.sort((left, right) => left - right);
+  const ms = samples[Math.floor(samples.length / 2)];
+  durationCache.set(key, { ms, at: Date.now() });
+  return ms;
+}
+
+function computePlacedTrains(nowMs) {
+  const placed = [];
+  const seen = new Set();
+  lineRoutes.forEach((route) => {
+    for (let index = 0; index < route.stations.length - 1; index += 1) {
+      const duration = segmentDuration(route, index);
+      if (!duration) continue;
+      const nextStation = route.stations[index + 1];
+      trainsToward(route, index + 1).forEach((train) => {
+        const arrival = parseHongKongTime(train.time);
+        if (!arrival) return;
+        const depart = arrival.getTime() - duration;
+        if (nowMs < depart || nowMs > arrival.getTime()) return;
+        const id = route.line + "|" + train.dest + "|" + arrival.getTime() + "|" + (route.viaRac ? "R" : "N");
+        if (seen.has(id)) return;
+        const geometry = segmentGeometry(route, route.stations[index], nextStation);
+        if (!geometry || geometry.length < 2) return;
+        const at = pointAlong(geometry, (nowMs - depart) / duration);
+        seen.add(id);
+        placed.push({
+          id,
+          point: at.point,
+          bearing: at.bearing,
+          color: route.color,
+          dest: train.dest,
+          line: route.line,
+          next: nextStation,
+          arrive: arrival,
+          viaRac: route.viaRac,
+        });
+      });
+    }
+  });
+  return placed;
+}
+
+function showTrainDetail(train) {
+  requestToken += 1;
+  selectStationFeature("");
+  const destination = stationByCode.get(train.dest);
+  const line = lineByCode.get(train.line);
+  const minutes = Math.round((train.arrive.getTime() - Date.now()) / 60000);
+  clearNode(detail);
+  detail.append(el("h2", null, "往" + (destination ? destination.name : train.dest)));
+  detail.append(el("p", "meta", line ? line.name : train.line));
+  if (train.viaRac) detail.append(el("p", "meta", "經馬場"));
+  detail.append(el("p", null, minutes <= 0 ? "即將到" + train.next.name : "約 " + minutes + " 分鐘到" + train.next.name));
+  revealDetail();
+}
+
+function clearTrainMarkers() {
+  trainMarkers.forEach((marker) => marker.remove());
+  trainMarkers.clear();
+}
+
+function renderMovingTrains() {
+  if (!map || map.getZoom() < TRAIN_ZOOM) {
+    clearTrainMarkers();
+    return;
+  }
+  const placed = computePlacedTrains(Date.now());
+  const seen = new Set();
+  placed.forEach((train) => {
+    seen.add(train.id);
+    let marker = trainMarkers.get(train.id);
+    if (!marker) {
+      const node = document.createElement("button");
+      node.type = "button";
+      node.className = "train-marker";
+      node.setAttribute("aria-label", "列車");
+      node.addEventListener("click", (event) => {
+        event.stopPropagation();
+        showTrainDetail(marker._train);
+      });
+      marker = new maplibregl.Marker({ element: node, rotationAlignment: "map" }).setLngLat(train.point).addTo(map);
+      trainMarkers.set(train.id, marker);
+    }
+    marker._train = train;
+    marker.setLngLat(train.point);
+    marker.setRotation(train.bearing + 90);
+  });
+  trainMarkers.forEach((marker, id) => {
+    if (!seen.has(id)) {
+      marker.remove();
+      trainMarkers.delete(id);
+    }
+  });
+}
+
+function refreshTrainSchedules() {
+  if (!map || map.getZoom() < TRAIN_ZOOM || document.hidden) return;
+  ensureRoutes();
+  const jobs = stationJobsInView().filter((job) => {
+    const cached = scheduleCache.get(job.line + ":" + job.code);
+    return !cached || Date.now() - cached.fetchedAt > 30000;
+  });
+  if (!jobs.length) {
+    renderMovingTrains();
+    return;
+  }
+  Promise.all(jobs.map((job) => fetchLine(job.line, job.code))).then((results) => {
+    results.forEach((result, index) => {
+      scheduleCache.set(jobs[index].line + ":" + jobs[index].code, {
+        ...result,
+        fetchedAt: Date.now(),
+      });
+    });
+    durationCache.clear();
+    renderMovingTrains();
+  });
+}
+
+function updateTrainsForView() {
+  if (!map || map.getZoom() < TRAIN_ZOOM) {
+    clearTrainMarkers();
+    return;
+  }
+  ensureRoutes();
+  refreshTrainSchedules();
+}
+
 function createMap() {
   map = new maplibregl.Map({
     container: "map",
@@ -383,10 +785,10 @@ function createMap() {
     });
     map.addSource("cameras", {
       type: "geojson",
-      data: cameraFeatures(),
+      data: cameraFeatures([]),
       cluster: true,
       clusterRadius: 42,
-      clusterMaxZoom: 13,
+      clusterMaxZoom: CAMERA_ZOOM,
       promoteId: "key",
     });
     map.addLayer({
@@ -467,8 +869,13 @@ function createMap() {
     if (selectedStation) {
       map.setFeatureState({ source: "stations", id: selectedStation }, { selected: true });
     }
+    map.on("moveend", () => {
+      updateCamerasForView();
+      updateTrainsForView();
+    });
     applyLayerToggles();
     fitAll();
+    updateCamerasForView();
   });
 }
 
@@ -523,24 +930,22 @@ document.querySelector("#reset").addEventListener("click", () => {
   fitAll();
 });
 searchInput.addEventListener("input", () => showSearch(searchInput.value));
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) updateTrainsForView();
+});
+setInterval(() => {
+  if (!document.hidden) renderMovingTrains();
+}, 1000);
 
-Promise.allSettled([loadJson("data/network.json"), loadJson("data/cameras.json")]).then(([networkResult, cameraResult]) => {
-  if (networkResult.status === "fulfilled") {
-    network = networkResult.value;
-    stationByCode = new Map(network.stations.map((station) => [station.code, station]));
-    lineByCode = new Map(network.lines.map((line) => [line.code, line]));
-    renderLegend();
-  } else {
-    showBanner("暫時未能載入港鐵網絡。");
-  }
-  if (cameraResult.status === "fulfilled") {
-    cameras = cameraResult.value;
-  } else {
-    showBanner("暫時未能載入交通快拍點。");
-  }
-  const stationText = network.stations.length ? network.stations.length + " 個港鐵站" : "港鐵網絡未能載入";
-  const cameraText = cameras.length ? cameras.length + " 個交通快拍點" : "交通快拍暫時未能載入";
-  summary.textContent = stationText + " · " + cameraText;
+loadJson("data/network.json").then((data) => {
+  network = data;
+  stationByCode = new Map(network.stations.map((station) => [station.code, station]));
+  lineByCode = new Map(network.lines.map((line) => [line.code, line]));
+  renderLegend();
+}).catch(() => {
+  showBanner("暫時未能載入港鐵網絡。");
+}).finally(() => {
+  updateSummary();
   if (searchInput.value.trim()) showSearch(searchInput.value);
   createMap();
 });

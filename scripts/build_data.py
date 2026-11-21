@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import math
+import sys
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -53,6 +54,19 @@ SPINE = {code: "UT" for code, _, _ in LINES}
 SPURS = {
     "EAL": [["SHS", "LMC"], ["SHT", "RAC", "UNI"]],
     "TKL": [["TKO", "LHP"]],
+}
+# One full OpenStreetMap route for each line, plus branch routes that leave the main track.
+TRACK_RELATIONS = {
+    "ISL": [4432666],
+    "TWL": [9736530],
+    "KTL": [6452935],
+    "TKL": [269672, 9736610],
+    "EAL": [4248592, 4250435, 4248591],
+    "TML": [6102299],
+    "TCL": [5317706],
+    "AEL": [5317239],
+    "SIL": [6827211],
+    "DRL": [4709540],
 }
 
 
@@ -127,9 +141,9 @@ def ecef_to_geodetic(x, y, z):
     return math.degrees(lat), math.degrees(lon)
 
 
-def fetch(url):
+def fetch(url, timeout=30):
     request = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
 
 
@@ -262,6 +276,147 @@ def build_network():
     (DATA / "network.json").write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
+def metres(lon, lat):
+    return (lon * 111320 * math.cos(math.radians(22.3)), lat * 110540)
+
+
+def metres_between(a, b):
+    ax, ay = metres(*a)
+    bx, by = metres(*b)
+    return math.hypot(ax - bx, ay - by)
+
+
+def point_segment_metres(point, start, end):
+    px, py = metres(*point)
+    ax, ay = metres(*start)
+    bx, by = metres(*end)
+    dx, dy = bx - ax, by - ay
+    if dx == dy == 0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0, min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def nearest_track_metres(point, paths):
+    best = float("inf")
+    for path in paths:
+        for start, end in zip(path, path[1:]):
+            best = min(best, point_segment_metres(point, start, end))
+            if best < 25:
+                return best
+    return best
+
+
+def douglas_peucker(points, epsilon):
+    if len(points) < 3:
+        return points
+    start, end = points[0], points[-1]
+    index, distance = 0, 0
+    for i in range(1, len(points) - 1):
+        current = point_segment_metres(points[i], start, end)
+        if current > distance:
+            index, distance = i, current
+    if distance <= epsilon:
+        return [start, end]
+    left = douglas_peucker(points[: index + 1], epsilon)
+    right = douglas_peucker(points[index:], epsilon)
+    return left[:-1] + right
+
+
+def fetch_route_ways(relation_id):
+    url = f"https://api.openstreetmap.org/api/0.6/relation/{relation_id}/full"
+    request = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(request, timeout=90) as response:
+        root = ET.fromstring(response.read())
+    nodes = {}
+    for node in root.findall("node"):
+        nodes[node.get("id")] = (float(node.get("lon")), float(node.get("lat")))
+    ways = {}
+    for way in root.findall("way"):
+        points = [nodes[nd.get("ref")] for nd in way.findall("nd") if nd.get("ref") in nodes]
+        ways[way.get("id")] = points
+    relation = root.find("relation")
+    ordered = []
+    for member in relation.findall("member"):
+        if member.get("type") != "way" or member.get("role") not in {"", "forward", "backward", "route"}:
+            continue
+        points = ways.get(member.get("ref"))
+        if points and len(points) >= 2:
+            ordered.append(points)
+    return ordered
+
+
+def stitch_ways(ways):
+    parts = []
+    current = []
+    for points in ways:
+        if not current:
+            current = points[:]
+            continue
+        if metres_between(current[-1], points[0]) < 40:
+            current.extend(points[1:])
+        elif metres_between(current[-1], points[-1]) < 40:
+            current.extend(list(reversed(points))[1:])
+        else:
+            parts.append(current)
+            current = points[:]
+    if current:
+        parts.append(current)
+    simplified = []
+    for part in parts:
+        if len(part) < 2:
+            continue
+        reduced = douglas_peucker(part, 8)
+        if sum(metres_between(a, b) for a, b in zip(reduced, reduced[1:])) >= 80:
+            simplified.append([[round(lon, 6), round(lat, 6)] for lon, lat in reduced])
+    return simplified
+
+
+def branch_only(paths, existing):
+    if not existing:
+        return paths
+    kept = []
+    for path in paths:
+        far = [nearest_track_metres(point, existing) > 35 for point in path]
+        index = 0
+        while index < len(path):
+            if not far[index]:
+                index += 1
+                continue
+            start = max(0, index - 1)
+            while index < len(path) and far[index]:
+                index += 1
+            end = min(len(path), index + 1)
+            piece = path[start:end]
+            if len(piece) >= 2:
+                kept.append(piece)
+    return kept
+
+
+def realistic_paths(line_code):
+    paths = []
+    for relation_id in TRACK_RELATIONS[line_code]:
+        stitched = stitch_ways(fetch_route_ways(relation_id))
+        if paths:
+            stitched = branch_only(stitched, paths)
+        paths.extend(stitched)
+        print(f"  {line_code} relation {relation_id}: {sum(len(path) for path in stitched)} points")
+    if not paths:
+        raise RuntimeError(f"{line_code} 沒有軌道形狀")
+    return paths
+
+
+def apply_track_shapes():
+    sys.setrecursionlimit(10000)
+    network_path = DATA / "network.json"
+    payload = json.loads(network_path.read_text(encoding="utf-8"))
+    for line in payload["lines"]:
+        print(line["code"], line["name"])
+        line["paths"] = realistic_paths(line["code"])
+    network_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    print("已寫入軌道形狀")
+
+
 def build_cameras():
     raw = fetch("https://static.data.gov.hk/td/traffic-snapshot-images/code/Traffic_Camera_Locations_Tc.xml")
     root = ET.fromstring(raw)
@@ -296,5 +451,9 @@ def build_cameras():
 
 if __name__ == "__main__":
     DATA.mkdir(exist_ok=True)
-    build_network()
-    build_cameras()
+    if len(sys.argv) > 1 and sys.argv[1] == "tracks":
+        apply_track_shapes()
+    else:
+        build_network()
+        apply_track_shapes()
+        build_cameras()
