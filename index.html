@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>香港智慧城市地圖</title>
+  <link rel="stylesheet" href="vendor/maplibre-gl.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <header class="masthead">
+        <p class="eyebrow">香港</p>
+        <h1>智慧城市地圖</h1>
+        <p class="lede">點選港鐵站查看到站班次，點選交通快拍點查看最新照片。</p>
+        <p id="summary" class="summary">正在載入資料…</p>
+      </header>
+      <label class="search">
+        <span>搜尋</span>
+        <input id="search" type="search" placeholder="例如金鐘、馬場、紅隧" autocomplete="off">
+      </label>
+      <ul id="results" class="results" hidden></ul>
+      <fieldset class="toggles">
+        <legend>圖層</legend>
+        <label><input id="toggle-mtr" type="checkbox" checked> 港鐵網絡</label>
+        <label><input id="toggle-cam" type="checkbox" checked> 交通快拍</label>
+      </fieldset>
+      <ul id="legend" class="legend"></ul>
+      <button id="reset" type="button">顯示全港</button>
+      <section id="detail" class="detail" aria-live="polite">
+        <p class="muted">在地圖上選擇一個車站或快拍點。暫時沒有班次或照片時，這裡會說明原因。</p>
+      </section>
+      <footer class="sources">
+        <p>底圖由 OpenFreeMap 提供，地圖資料來自 OpenStreetMap。</p>
+        <p>車站位置來自地政總署地圖搜尋。到站班次來自港鐵實時列車服務資訊。快拍圖像來自運輸署。</p>
+      </footer>
+    </aside>
+    <div id="map" role="application" aria-label="香港地圖"></div>
+  </div>
+  <p id="banner" class="banner" hidden role="status"></p>
+  <script src="vendor/maplibre-gl.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
