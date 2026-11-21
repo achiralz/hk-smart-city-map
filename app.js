@@ -149,12 +149,26 @@ function renderEmptyDetail() {
   detail.append(el("p", "muted", "在地圖上選擇一個車站或快拍點。暫時沒有班次或照片時，這裡會說明原因。"));
 }
 
-function trainRow(train) {
-  const minutes = String(train.ttnt);
-  const when = minutes === "0" ? "即將到站" : minutes + " 分鐘";
+function parseHongKongTime(value) {
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(value || ""))) return null;
+  const parsed = new Date(String(value).replace(" ", "T") + "+08:00");
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function countdownText(train, currTime) {
+  const arrival = parseHongKongTime(train.time);
+  const now = parseHongKongTime(currTime);
+  if (!arrival || !now) return "未能計算到站時間";
+  const minutes = Math.round((arrival.getTime() - now.getTime()) / 60000);
+  if (minutes <= 0) return "即將到站";
+  return minutes + " 分鐘";
+}
+
+function trainRow(train, currTime) {
   const row = el("div", "train");
-  row.append(el("div", "when", when));
+  row.append(el("div", "when", countdownText(train, currTime)));
   const bits = [];
+  if (train.route === "RAC") bits.push("經馬場");
   if (train.plat) bits.push(train.plat + " 號月台");
   if (train.time && String(train.time).length >= 16) bits.push(String(train.time).slice(11, 16));
   if (train.valid === "N") bits.push("預計時間");
@@ -162,11 +176,11 @@ function trainRow(train) {
   return row;
 }
 
-function renderDestination(trains) {
+function renderDestination(trains, currTime) {
   const destination = stationByCode.get(trains[0].dest);
   const block = el("div", "direction");
   block.append(el("h4", null, "往" + (destination ? destination.name : trains[0].dest)));
-  trains.forEach((train) => block.append(trainRow(train)));
+  trains.forEach((train) => block.append(trainRow(train, currTime)));
   return block;
 }
 
@@ -251,7 +265,7 @@ async function openStation(station) {
     if (!trains.length) {
       section.append(el("p", "notice", "這個車站暫時沒有即將到站的班次。"));
     } else {
-      groupByDestination(trains).forEach((group) => section.append(renderDestination(group)));
+      groupByDestination(trains).forEach((group) => section.append(renderDestination(group, row.updated)));
     }
     if (row.updated) section.append(el("p", "meta", "資料時間 " + row.updated));
     detail.append(section);

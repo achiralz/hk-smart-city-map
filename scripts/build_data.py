@@ -51,7 +51,7 @@ LINE_NAME = {code: name for code, name, _ in LINES}
 LINE_COLOR = {code: color for code, _, color in LINES}
 SPINE = {code: "UT" for code, _, _ in LINES}
 SPURS = {
-    "EAL": [["SHS", "LMC"], ["FOT", "RAC"]],
+    "EAL": [["SHS", "LMC"], ["SHT", "RAC", "UNI"]],
     "TKL": [["TKO", "LHP"]],
 }
 

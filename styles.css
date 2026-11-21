@@ -221,7 +221,7 @@ h1 {
 
 @media (max-width: 800px) {
   .app { grid-template-columns: 1fr; grid-template-rows: 42vh minmax(0, 1fr); }
-  #map { order: -1; height: 42vh; }
+  #map { order: -1; height: 42vh; min-height: 0; }
   .panel { border-right: 0; border-top: 1px solid var(--line); }
   .masthead { order: 1; }
   .detail { order: 2; }
